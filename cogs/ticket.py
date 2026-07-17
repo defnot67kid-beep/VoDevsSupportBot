@@ -1,622 +1,298 @@
 import discord
 from discord.ext import commands
-from discord.ui import Select, View, Modal, TextInput, Button
+from discord.ui import Select, View, Modal, TextInput
 import asyncio
 import secrets
 import string
 from datetime import datetime, timedelta
-import json
-import os
 
 # ============================================
-# DATA PERSISTENCE
+# 1. THE POPUP FORM (MODAL)
 # ============================================
-
-class TicketData:
-    def __init__(self):
-        self.data_file = "ticket_data.json"
-        self.tickets = {}  # channel_id -> ticket_info
-        self.load_data()
-    
-    def load_data(self):
-        if os.path.exists(self.data_file):
-            try:
-                with open(self.data_file, "r") as f:
-                    self.tickets = json.load(f)
-            except:
-                self.tickets = {}
-    
-    def save_data(self):
-        with open(self.data_file, "w") as f:
-            json.dump(self.tickets, f, indent=4)
-    
-    def create_ticket(self, channel_id, user_id, category, reason, ticket_code):
-        self.tickets[str(channel_id)] = {
-            "user_id": str(user_id),
-            "category": category,
-            "reason": reason,
-            "ticket_code": ticket_code,
-            "created_at": datetime.now().isoformat(),
-            "claimed_by": None,
-            "status": "open",
-            "messages": []
-        }
-        self.save_data()
-    
-    def claim_ticket(self, channel_id, staff_id):
-        if str(channel_id) in self.tickets:
-            self.tickets[str(channel_id)]["claimed_by"] = str(staff_id)
-            self.tickets[str(channel_id)]["status"] = "claimed"
-            self.save_data()
-            return True
-        return False
-    
-    def close_ticket(self, channel_id):
-        if str(channel_id) in self.tickets:
-            self.tickets[str(channel_id)]["status"] = "closed"
-            self.save_data()
-            return True
-        return False
-    
-    def get_ticket(self, channel_id):
-        return self.tickets.get(str(channel_id))
-
-ticket_data = TicketData()
-
-# ============================================
-# TICKET MODAL
-# ============================================
-
 class TicketModal(Modal, title="Create a Ticket"):
-    def __init__(self, category):
+    def __init__(self, category_name, ping_role):
         super().__init__()
-        self.category = category
-    
-    reason_input = TextInput(
-        label="What is your issue?",
+        self.category_name = category_name
+        self.ping_role = ping_role
+
+    help_input = TextInput(
+        label="What do you need help with?",
         style=discord.TextStyle.paragraph,
-        placeholder="Please describe your issue in detail...",
+        placeholder="Describe your issue in detail...",
         required=True,
-        min_length=10,
+        min_length=20,
         max_length=2000
     )
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        
+
         guild = interaction.guild
         member = interaction.user
-        category = self.category
-        reason = self.reason_input.value
-        
-        # Check for existing open ticket
+        category_name = self.category_name
+        issue_description = self.help_input.value
+        ping_role = self.ping_role
+
+        # 1. Check if the user already has an open ticket
         for channel in guild.channels:
             if isinstance(channel, discord.TextChannel) and channel.name.startswith("ticket-"):
                 if member in channel.members:
-                    # Check if ticket is still open
-                    ticket_info = ticket_data.get_ticket(channel.id)
-                    if ticket_info and ticket_info.get("status") != "closed":
-                        await interaction.followup.send(
-                            f"❌ You already have an open ticket! Please close it first.\n{channel.mention}",
-                            ephemeral=True
-                        )
-                        return
-        
-        # Generate ticket code
+                    await interaction.followup.send("❌ You already have an open ticket! Please close it before opening a new one.", ephemeral=True)
+                    return
+
+        # 2. GENERATE A UNIQUE RANDOM CODE
         alphabet = string.ascii_lowercase + string.digits
         while True:
             ticket_code = ''.join(secrets.choice(alphabet) for _ in range(5))
             channel_name = f"ticket-{ticket_code}"
+            
             if not discord.utils.get(guild.channels, name=channel_name):
-                break
-        
-        # Get or create ticket category
-        ticket_category = discord.utils.get(guild.categories, name="TICKETS")
-        if not ticket_category:
-            ticket_category = await guild.create_category("TICKETS")
-        
-        # Setup permissions
+                break 
+
+        # 3. Create the ticket channel
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
             member: discord.PermissionOverwrite(
                 read_messages=True,
                 send_messages=True,
-                read_message_history=True,
-                attach_files=True,
-                embed_links=True
-            )
-        }
-        
-        # Add support roles
-        support_role = discord.utils.get(guild.roles, name="Support")
-        if support_role:
-            overwrites[support_role] = discord.PermissionOverwrite(
-                read_messages=True,
-                send_messages=True,
                 read_message_history=True
             )
-        
-        # Create channel
+        }
+
+        # Add the ticket roles to the channel overwrites so they can see it
+        ticket_role = discord.utils.get(guild.roles, name="Ticket Support")
+        report_role = discord.utils.get(guild.roles, name="Report Player Staff")
+        suggest_role = discord.utils.get(guild.roles, name="Suggestion & Report Staff")
+
+        if ticket_role:
+            overwrites[ticket_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        if report_role:
+            overwrites[report_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        if suggest_role:
+            overwrites[suggest_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
         ticket_channel = await guild.create_text_channel(
-            name=f"ticket-{ticket_code}",
-            category=ticket_category,
+            name=channel_name,
             overwrites=overwrites,
-            reason=f"Ticket opened by {member}"
+            reason=f"New ticket opened by {member} for {category_name}"
         )
-        
-        # Store ticket data
-        ticket_data.create_ticket(
-            ticket_channel.id,
-            member.id,
-            category,
-            reason,
-            ticket_code
-        )
-        
-        # Send initial ticket embed
+
+        # 4. Send the initial message in the new ticket channel with the role ping
         embed = discord.Embed(
-            title="🎫 Ticket Created",
-            description=f"Ticket created by {member.mention}",
-            color=discord.Color.blue(),
+            title="🎫 Ticket Opened",
+            description=(
+                f"Hello {member.mention},\n"
+                f"Thank you for contacting support!\n"
+                f"**Category:** {category_name}\n"
+                f"**Reason:** {issue_description}\n\n"
+                f"Please wait patiently, a staff member will be with you shortly.\n\n"
+                f"🕒 **Auto-Close:** This ticket will automatically close in 24 hours if inactive."
+            ),
+            color=discord.Color.green(),
             timestamp=datetime.utcnow()
         )
-        embed.add_field(
-            name="📋 Category",
-            value=category,
-            inline=True
-        )
-        embed.add_field(
-            name="🆔 Ticket Code",
-            value=f"`{ticket_code}`",
-            inline=True
-        )
-        embed.add_field(
-            name="📝 Reason",
-            value=reason[:500],
-            inline=False
-        )
-        embed.set_footer(text=f"User ID: {member.id}")
         
-        # Ticket controls view
-        view = TicketControlsView(member.id, ticket_channel.id)
-        
-        await ticket_channel.send(embed=embed, view=view)
-        
-        # Send category-specific ping
-        ping_role = None
-        if category == "Appeals":
-            ping_role = discord.utils.get(guild.roles, name="Appeals Team")
-        elif category == "Report Player":
-            ping_role = discord.utils.get(guild.roles, name="Moderation Team")
-        elif category == "Support":
-            ping_role = discord.utils.get(guild.roles, name="Support")
-        
-        if ping_role:
-            await ticket_channel.send(f"{ping_role.mention} - A new ticket has been created!", delete_after=5)
-        
-        # Notify user
-        await interaction.followup.send(
-            f"✅ Ticket created! Please go to {ticket_channel.mention}",
-            ephemeral=True
-        )
+        # CLOSE BUTTONS
+        close_button = discord.ui.Button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="close_ticket_user")
+        view = discord.ui.View()
+        view.add_item(close_button)
+
+        await ticket_channel.send(content=ping_role.mention if ping_role else None, embed=embed, view=view)
+
+        # 5. Notify the user in the original channel
+        await interaction.followup.send(f"✅ Ticket created! Please go to {ticket_channel.mention}", ephemeral=True)
+
+        # 6. SCHEDULE AUTO-CLOSE IN 24 HOURS
+        async def auto_close():
+            await asyncio.sleep(86400) # 24 hours
+            try:
+                # Check if the channel still exists before deleting
+                if ticket_channel and ticket_channel.guild:
+                    await ticket_channel.send("⏰ **Auto-Closing:** This ticket has been inactive for 24 hours and is now being deleted.")
+                    await asyncio.sleep(5)
+                    await ticket_channel.delete(reason="Auto-closed after 24 hours of inactivity.")
+            except:
+                pass # Channel already deleted manually
+
+        # Start the background task
+        asyncio.create_task(auto_close())
+
 
 # ============================================
-# TICKET CONTROLS VIEW
+# 2. THE DROPDOWN MENU (NOW IN A VIEW)
 # ============================================
-
-class TicketControlsView(View):
-    def __init__(self, user_id, channel_id):
-        super().__init__(timeout=None)
-        self.user_id = user_id
-        self.channel_id = channel_id
-        
-        # Claim Button
-        self.add_item(Button(
-            label="Claim",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"claim_ticket_{channel_id}",
-            emoji="📌"
-        ))
-        
-        # Close Button
-        self.add_item(Button(
-            label="Close",
-            style=discord.ButtonStyle.danger,
-            custom_id=f"close_ticket_{channel_id}",
-            emoji="🔒"
-        ))
-        
-        # Request Closure Button (for users)
-        self.add_item(Button(
-            label="Request Closure",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"request_close_{channel_id}",
-            emoji="⏳"
-        ))
-
-# ============================================
-# TICKET SELECT (DROP DOWN)
-# ============================================
-
 class TicketSelect(Select):
-    def __init__(self):
+    def __init__(self, ticket_role, report_role, suggest_role):
+        self.ticket_role = ticket_role
+        self.report_role = report_role
+        self.suggest_role = suggest_role
+
         options = [
-            discord.SelectOption(
-                label="Appeals",
-                description="Appeal a ban or punishment",
-                emoji="⚖️",
-                value="Appeals"
-            ),
-            discord.SelectOption(
-                label="Report Player",
-                description="Report a player for rule-breaking",
-                emoji="🚨",
-                value="Report Player"
-            ),
-            discord.SelectOption(
-                label="Support",
-                description="General support and assistance",
-                emoji="❔",
-                value="Support"
-            ),
-            discord.SelectOption(
-                label="Suggestion",
-                description="Suggest a new feature or change",
-                emoji="💡",
-                value="Suggestion"
-            ),
-            discord.SelectOption(
-                label="Report Staff",
-                description="Report a staff member",
-                emoji="👮",
-                value="Report Staff"
-            ),
+            discord.SelectOption(label="Need Help With Smth", description="General questions or assistance", emoji="❔"),
+            discord.SelectOption(label="Report a Player", description="Report rule-breaking or bad behavior", emoji="🚨"),
+            discord.SelectOption(label="Suggestion", description="Suggest a new feature or improvement", emoji="💡"),
+            discord.SelectOption(label="Report a Staff", description="File a complaint against a staff member", emoji="👮"),
+            discord.SelectOption(label="Other", description="Anything else not covered above", emoji="📝"),
         ]
-        super().__init__(
-            placeholder="Select a ticket category...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-    
+        super().__init__(placeholder="Make a selection", min_values=1, max_values=1, options=options)
+
     async def callback(self, interaction: discord.Interaction):
-        selected = self.values[0]
-        await interaction.response.send_modal(TicketModal(selected))
+        selected_category = self.values[0]
+        
+        ping_role = None
+        if selected_category in ["Need Help With Smth", "Other"]:
+            ping_role = self.ticket_role
+        elif selected_category == "Report a Player":
+            ping_role = self.report_role
+        elif selected_category in ["Suggestion", "Report a Staff"]:
+            ping_role = self.suggest_role
 
-class TicketPanelView(View):
-    def __init__(self):
+        await interaction.response.send_modal(TicketModal(selected_category, ping_role))
+
+
+class TicketView(View):
+    def __init__(self, ticket_role, report_role, suggest_role):
         super().__init__(timeout=None)
-        self.add_item(TicketSelect())
+        self.add_item(TicketSelect(ticket_role, report_role, suggest_role))
+
 
 # ============================================
-# MAIN COG
+# 3. THE MAIN COG
 # ============================================
-
 class Ticket(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.bot.add_view(TicketPanelView())
-        self.bot.add_view(TicketControlsView(0, 0))
-    
+
     @commands.command(name="ticketsetup")
     @commands.has_permissions(administrator=True)
     async def ticket_setup(self, ctx):
-        """[Admin] Deploy the ticket panel"""
+        """[Admin] Creates 3 roles and deploys the ticket panel."""
+        
+        # 👇 DELETE THE COMMAND MESSAGE IMMEDIATELY
         try:
             await ctx.message.delete()
         except:
             pass
-        
-        # Get or create necessary roles
+
         guild = ctx.guild
-        
-        # Support role
-        support_role = discord.utils.get(guild.roles, name="Support")
-        if not support_role:
-            support_role = await guild.create_role(
-                name="Support",
-                color=discord.Color.blue()
-            )
-        
-        # Moderation role
-        mod_role = discord.utils.get(guild.roles, name="Moderation Team")
-        if not mod_role:
-            mod_role = await guild.create_role(
-                name="Moderation Team",
-                color=discord.Color.red()
-            )
-        
-        # Appeals role
-        appeals_role = discord.utils.get(guild.roles, name="Appeals Team")
-        if not appeals_role:
-            appeals_role = await guild.create_role(
-                name="Appeals Team",
-                color=discord.Color.gold()
-            )
-        
-        # Create ticket category
-        ticket_category = discord.utils.get(guild.categories, name="TICKETS")
-        if not ticket_category:
-            ticket_category = await guild.create_category("TICKETS")
-        
-        # Create ticket logs channel
-        logs_channel = discord.utils.get(guild.text_channels, name="ticket-logs")
-        if not logs_channel:
-            logs_channel = await guild.create_text_channel(
-                "ticket-logs",
-                category=ticket_category
-            )
-        
-        # Setup ticket panel
-        embed = discord.Embed(
-            title="🎫 Support Tickets",
-            description="Select a category below to create a ticket.",
-            color=discord.Color.blue()
+
+        # Send initial setup message
+        setup_msg = await ctx.send("⏳ Setting up roles...")
+
+        async def get_or_create_role(name, color):
+            role = discord.utils.get(guild.roles, name=name)
+            if not role:
+                role = await guild.create_role(name=name, color=color)
+                return role, True
+            return role, False
+
+        ticket_role, ticket_created = await get_or_create_role("Ticket Support", discord.Color.blue())
+        report_role, report_created = await get_or_create_role("Report Player Staff", discord.Color.red())
+        suggest_role, suggest_created = await get_or_create_role("Suggestion & Report Staff", discord.Color.purple())
+
+        await asyncio.sleep(1)
+        await setup_msg.delete() # Delete the "Setting up roles..." message
+
+        try:
+            file = discord.File("ticket_banner.png", filename="banner.png")
+        except FileNotFoundError:
+            file = None
+
+        embed = discord.Embed(color=discord.Color.blue())
+        if file:
+            embed.set_image(url="attachment://banner.png")
+
+        embed.description = (
+            "**Welcome!**\n\n"
+            "To contact Vortex support, please select the appropriate category below.\n"
+            "It's important that you select the most accurate category, this helps us better assist you!\n\n"
+            "Please fill out the form to the best of your ability.\n"
+            "Server Invite: https://discord.gg/HpGFYthxDR"
         )
-        embed.add_field(
-            name="📋 What type of ticket?",
-            value=(
-                "**Appeals** - Appeal a ban or punishment\n"
-                "**Report Player** - Report a player for rule-breaking\n"
-                "**Support** - General support and assistance\n"
-                "**Suggestion** - Suggest a new feature or change\n"
-                "**Report Staff** - Report a staff member"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="📌 Note",
-            value="Please select the most accurate category for faster assistance.",
-            inline=False
-        )
-        embed.set_footer(text="Vortex Support System")
-        
-        view = TicketPanelView()
-        
-        await ctx.send(embed=embed, view=view)
-        
-        # Log setup
-        embed_log = discord.Embed(
-            title="✅ Ticket System Setup Complete",
-            color=discord.Color.green()
-        )
-        embed_log.add_field(
-            name="📋 Roles Created/Found",
-            value=(
-                f"Support: {support_role.mention}\n"
-                f"Moderation Team: {mod_role.mention}\n"
-                f"Appeals Team: {appeals_role.mention}"
-            ),
-            inline=False
-        )
-        embed_log.add_field(
-            name="📁 Category",
-            value=ticket_category.mention,
-            inline=False
-        )
-        embed_log.add_field(
-            name="📊 Logs Channel",
-            value=logs_channel.mention,
-            inline=False
-        )
-        
-        await ctx.send(embed=embed_log, delete_after=10)
-    
+
+        # 👇 CREATE THE VIEW THAT CONTAINS THE DROPDOWN INSIDE THE BOX
+        view = TicketView(ticket_role, report_role, suggest_role)
+
+        # 👇 SEND THE MESSAGE WITH THE EMBED AND THE VIEW ATTACHED
+        await ctx.send(embed=embed, file=file, view=view)
+
+
     # ============================================
-    # TICKET BUTTON HANDLERS
+    # 4. CLOSE TICKET BUTTON HANDLER
     # ============================================
-    
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
         if interaction.type != discord.InteractionType.component:
             return
-        
-        custom_id = interaction.data.get("custom_id", "")
-        
-        # ==========================================
-        # CLAIM TICKET
-        # ==========================================
-        if custom_id.startswith("claim_ticket_"):
-            channel_id = int(custom_id.split("_")[2])
-            channel = interaction.guild.get_channel(channel_id)
-            
-            if not channel:
-                await interaction.response.send_message("❌ Ticket channel not found.", ephemeral=True)
-                return
-            
-            ticket_info = ticket_data.get_ticket(channel_id)
-            if not ticket_info:
-                await interaction.response.send_message("❌ Ticket not found.", ephemeral=True)
-                return
-            
-            if ticket_info.get("claimed_by"):
-                claimed_by = interaction.guild.get_member(int(ticket_info["claimed_by"]))
-                await interaction.response.send_message(
-                    f"❌ This ticket is already claimed by {claimed_by.mention if claimed_by else 'unknown'}.",
-                    ephemeral=True
-                )
-                return
-            
-            # Check if user has staff permissions
-            support_role = discord.utils.get(interaction.guild.roles, name="Support")
-            mod_role = discord.utils.get(interaction.guild.roles, name="Moderation Team")
-            appeals_role = discord.utils.get(interaction.guild.roles, name="Appeals Team")
-            
-            has_permission = False
-            if support_role and support_role in interaction.user.roles:
-                has_permission = True
-            if mod_role and mod_role in interaction.user.roles:
-                has_permission = True
-            if appeals_role and appeals_role in interaction.user.roles:
-                has_permission = True
-            if interaction.user.guild_permissions.administrator:
-                has_permission = True
-            
-            if not has_permission:
-                await interaction.response.send_message(
-                    "❌ You don't have permission to claim tickets.",
-                    ephemeral=True
-                )
-                return
-            
-            # Claim the ticket
-            if ticket_data.claim_ticket(channel_id, interaction.user.id):
-                await interaction.response.send_message(
-                    f"✅ You have claimed this ticket!",
-                    ephemeral=True
-                )
-                
-                # Send notification in channel
-                await channel.send(
-                    f"📌 {interaction.user.mention} has claimed this ticket."
-                )
-                
-                # Update embed with claimed info
-                try:
-                    async for msg in channel.history(limit=1):
-                        if msg.embeds:
-                            embed = msg.embeds[0]
-                            embed.add_field(
-                                name="👤 Claimed By",
-                                value=interaction.user.mention,
-                                inline=True
-                            )
-                            await msg.edit(embed=embed)
-                            break
-                except:
-                    pass
-        
-        # ==========================================
-        # CLOSE TICKET
-        # ==========================================
-        elif custom_id.startswith("close_ticket_"):
-            channel_id = int(custom_id.split("_")[2])
-            channel = interaction.guild.get_channel(channel_id)
-            
-            if not channel:
-                await interaction.response.send_message("❌ Ticket channel not found.", ephemeral=True)
-                return
-            
-            # Check if user has permission to close
-            support_role = discord.utils.get(interaction.guild.roles, name="Support")
-            mod_role = discord.utils.get(interaction.guild.roles, name="Moderation Team")
-            appeals_role = discord.utils.get(interaction.guild.roles, name="Appeals Team")
-            
-            has_permission = False
-            if support_role and support_role in interaction.user.roles:
-                has_permission = True
-            if mod_role and mod_role in interaction.user.roles:
-                has_permission = True
-            if appeals_role and appeals_role in interaction.user.roles:
-                has_permission = True
-            if interaction.user.guild_permissions.administrator:
-                has_permission = True
-            
-            # Check if user is the ticket creator
-            ticket_info = ticket_data.get_ticket(channel_id)
-            is_creator = ticket_info and int(ticket_info["user_id"]) == interaction.user.id
-            
-            if not has_permission and not is_creator:
-                await interaction.response.send_message(
-                    "❌ You don't have permission to close this ticket.",
-                    ephemeral=True
-                )
-                return
-            
+
+        # ----------------------------------------------------------------
+        # NORMAL USER CLOSES THE TICKET (Instantly deletes)
+        # ----------------------------------------------------------------
+        if interaction.data.get("custom_id") == "close_ticket_user":
             await interaction.response.defer()
+            channel = interaction.channel
             
-            # Send closing message
-            embed = discord.Embed(
-                title="🔒 Ticket Closing",
-                description=f"This ticket is being closed by {interaction.user.mention}.",
-                color=discord.Color.orange()
-            )
-            embed.add_field(
-                name="⏳",
-                value="This channel will be deleted in 5 seconds.",
-                inline=False
-            )
-            await channel.send(embed=embed)
-            
-            # Log the ticket
-            logs_channel = discord.utils.get(interaction.guild.text_channels, name="ticket-logs")
-            if logs_channel:
-                log_embed = discord.Embed(
-                    title="📋 Ticket Closed",
-                    color=discord.Color.red(),
-                    timestamp=datetime.utcnow()
-                )
-                log_embed.add_field(
-                    name="Ticket",
-                    value=f"{channel.name}",
-                    inline=True
-                )
-                log_embed.add_field(
-                    name="Closed By",
-                    value=interaction.user.mention,
-                    inline=True
-                )
-                if ticket_info:
-                    log_embed.add_field(
-                        name="Created By",
-                        value=f"<@{ticket_info['user_id']}>",
-                        inline=True
-                    )
-                    log_embed.add_field(
-                        name="Category",
-                        value=ticket_info.get("category", "Unknown"),
-                        inline=True
-                    )
-                    if ticket_info.get("claimed_by"):
-                        log_embed.add_field(
-                            name="Claimed By",
-                            value=f"<@{ticket_info['claimed_by']}>",
-                            inline=True
-                        )
-                await logs_channel.send(embed=log_embed)
-            
-            # Delete the channel
-            ticket_data.close_ticket(channel_id)
+            await interaction.followup.send("🗑️ Closing ticket and deleting channel in 5 seconds...", ephemeral=True)
             await asyncio.sleep(5)
             try:
                 await channel.delete()
             except:
                 pass
-        
-        # ==========================================
-        # REQUEST CLOSURE
-        # ==========================================
-        elif custom_id.startswith("request_close_"):
-            channel_id = int(custom_id.split("_")[2])
-            channel = interaction.guild.get_channel(channel_id)
-            
-            if not channel:
-                await interaction.response.send_message("❌ Ticket channel not found.", ephemeral=True)
+
+        # ----------------------------------------------------------------
+        # ADMIN BUTTONS (Only visible to CloseTicketsRoles)
+        # ----------------------------------------------------------------
+        elif interaction.data.get("custom_id") == "close_ticket_admin":
+            await interaction.response.defer()
+
+            close_role = discord.utils.get(interaction.guild.roles, name="CloseTicketsRoles")
+            if not close_role or close_role not in interaction.user.roles:
+                await interaction.followup.send("❌ You do not have the **CloseTicketsRoles** role to use this.", ephemeral=True)
                 return
-            
-            ticket_info = ticket_data.get_ticket(channel_id)
-            if not ticket_info:
-                await interaction.response.send_message("❌ Ticket not found.", ephemeral=True)
-                return
-            
-            # Only ticket creator can request closure
-            if int(ticket_info["user_id"]) != interaction.user.id:
-                await interaction.response.send_message(
-                    "❌ Only the ticket creator can request closure.",
-                    ephemeral=True
-                )
-                return
-            
-            await interaction.response.send_message(
-                "✅ Closure requested. A staff member will close this ticket.",
-                ephemeral=True
+
+            embed = discord.Embed(
+                title="🛠️ Admin Ticket Controls",
+                description="You have the CloseTicketsRoles. Please select how you want to handle this ticket:",
+                color=discord.Color.blue()
             )
+            
+            request_button = discord.ui.Button(label="📅 Request to Close", style=discord.ButtonStyle.primary, custom_id="admin_request_close")
+            force_button = discord.ui.Button(label="❌ Force Close Now", style=discord.ButtonStyle.danger, custom_id="admin_force_close")
+            
+            view = discord.ui.View()
+            view.add_item(request_button)
+            view.add_item(force_button)
+            
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+        # ----------------------------------------------------------------
+        # ADMIN: Request to Close (24h)
+        # ----------------------------------------------------------------
+        elif interaction.data.get("custom_id") == "admin_request_close":
+            await interaction.response.defer()
+            channel = interaction.channel
             
             await channel.send(
-                f"⏳ {interaction.user.mention} has requested this ticket to be closed. "
-                f"A staff member will close it."
+                f"⚠️ **Admin {interaction.user.mention} has requested to close this ticket.**\n"
+                f"This channel will be automatically deleted in **24 hours**.\n"
+                f"Click the **Close Ticket** button below if you wish to close it immediately."
             )
+            await interaction.followup.send("✅ Request to close has been sent. The channel will auto-delete in 24 hours.", ephemeral=True)
+
+        # ----------------------------------------------------------------
+        # ADMIN: Force Close Now (Instant)
+        # ----------------------------------------------------------------
+        elif interaction.data.get("custom_id") == "admin_force_close":
+            await interaction.response.defer()
+            channel = interaction.channel
+            
+            await interaction.followup.send("🗑️ Force closing ticket and deleting channel in 5 seconds...", ephemeral=True)
+            await asyncio.sleep(5)
+            try:
+                await channel.delete()
+            except:
+                pass
 
 async def setup(bot):
     await bot.add_cog(Ticket(bot))
