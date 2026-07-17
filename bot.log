@@ -2472,3 +2472,13 @@ aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host gatewa
 [2026-07-17 08:52:37,871] [INFO] 👥 Watching 9 users
 [2026-07-17 08:52:37,871] [INFO] 👑 Owners: [1516568962966753291]
 [2026-07-17 08:52:38,046] [INFO] ✅ Commands synced to guild: 1526703518818373743
+[2026-07-17 09:59:16,922] [WARNING] PyNaCl is not installed, voice will NOT be supported
+[2026-07-17 09:59:16,923] [WARNING] davey is not installed, voice will NOT be supported
+[2026-07-17 09:59:16,979] [INFO] ✅ All cogs loaded successfully
+[2026-07-17 09:59:16,981] [INFO] logging in using static token
+[2026-07-17 09:59:18,034] [INFO] Shard ID None has connected to Gateway (Session ID: 90af369ce2f10ee15c4cf477e96303c4).
+[2026-07-17 09:59:20,051] [INFO] ✅ Logged in as VoDevs#1206
+[2026-07-17 09:59:20,051] [INFO] 📊 Serving 1 guilds
+[2026-07-17 09:59:20,052] [INFO] 👥 Watching 9 users
+[2026-07-17 09:59:20,052] [INFO] 👑 Owners: [1516568962966753291]
+[2026-07-17 09:59:20,238] [INFO] ✅ Commands synced to guild: 1526703518818373743
