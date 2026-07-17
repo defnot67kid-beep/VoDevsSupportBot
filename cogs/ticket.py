@@ -194,12 +194,17 @@ class Ticket(commands.Cog):
         await asyncio.sleep(1)
         await setup_msg.delete() # Delete the "Setting up roles..." message
 
+        # ============================================
+        # 🛠️ THE FIX: BANNER LOGIC
+        # ============================================
         try:
             file = discord.File("ticket_banner.png", filename="banner.png")
         except FileNotFoundError:
             file = None
 
         embed = discord.Embed(color=discord.Color.blue())
+        
+        # If the file exists, set the embed image to use the attachment
         if file:
             embed.set_image(url="attachment://banner.png")
 
@@ -211,11 +216,15 @@ class Ticket(commands.Cog):
             "Server Invite: https://discord.gg/HpGFYthxDR"
         )
 
-        # 👇 CREATE THE VIEW THAT CONTAINS THE DROPDOWN INSIDE THE BOX
+        # 👇 CREATE THE VIEW THAT CONTAINS THE DROPDOWN
         view = TicketView(ticket_role, report_role, suggest_role)
 
-        # 👇 SEND THE MESSAGE WITH THE EMBED AND THE VIEW ATTACHED
-        await ctx.send(embed=embed, file=file, view=view)
+        # ============================================
+        # 🛠️ THE FIX: SEND THE EMBED WITHOUT 'file=file'
+        # ============================================
+        # Sending 'file=file' causes discord to render it separately at the bottom.
+        # By removing it, Discord renders the linked 'attachment://banner.png' inside the embed perfectly.
+        await ctx.send(embed=embed, view=view)
 
 
     # ============================================
