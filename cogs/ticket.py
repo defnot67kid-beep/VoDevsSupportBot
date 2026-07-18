@@ -19,7 +19,7 @@ BAD_WORDS = ["nigger", "nigga", "faggot", "retard", "kike", "chink"]
 class OpenTicketModal(Modal, title="Appeals Ticket"):
     appeal_type = TextInput(
         label="What kind of appeal is this?",
-        placeholder="Vortex, Ban, Mute, etc...",
+        placeholder="Account, Ban, Mute, etc...",
         required=True,
         max_length=50
     )
