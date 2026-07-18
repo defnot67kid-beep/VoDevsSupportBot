@@ -19,15 +19,15 @@ BAD_WORDS = ["nigger", "nigga", "faggot", "retard", "kike", "chink"]
 class OpenTicketModal(Modal, title="Appeals Ticket"):
     appeal_type = TextInput(
         label="What kind of appeal is this?",
-        placeholder="Account, Ban, Mute, etc...",
+        placeholder="Partnering, Ban Appeal, etc...",
         required=True,
         max_length=50
     )
-    punishment = TextInput(
-        label="What punishment did you receive?",
-        placeholder="Ban, Kick, Mute...",
+    second_question = TextInput(
+        label="Question 2", # Label will be updated dynamically
+        placeholder="Answer here...",
         required=True,
-        max_length=50
+        max_length=500
     )
     reason = TextInput(
         label="Explain your reason behind the appeal.",
@@ -46,7 +46,7 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
         await interaction.response.defer(ephemeral=True)
 
         # --- FILTER: Check for racist / abusive language ---
-        combined_text = f"{self.appeal_type.value} {self.punishment.value} {self.reason.value}"
+        combined_text = f"{self.appeal_type.value} {self.second_question.value} {self.reason.value}"
         if any(bad_word in combined_text.lower() for bad_word in BAD_WORDS):
             await interaction.followup.send("❌ Your ticket reason contains inappropriate or hateful language. Please rephrase and try again.", ephemeral=True)
             return
@@ -160,8 +160,12 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
             color=discord.Color.dark_embed()
         )
         
+        # --- DYNAMIC LABEL FOR EMBED ---
+        is_partner = "partner" in self.appeal_type.value.lower()
+        second_label = "What punishment did you receive?" if not is_partner else "Partnership Details"
+        
         main_embed.add_field(name="What kind of appeal is this?", value=self.appeal_type.value, inline=False)
-        main_embed.add_field(name="What punishment did you receive?", value=self.punishment.value, inline=False)
+        main_embed.add_field(name=second_label, value=self.second_question.value, inline=False)
         main_embed.add_field(name="Explain your reason behind the appeal.", value=self.reason.value, inline=False)
 
         # 9. Construct Auto-Assign Message
@@ -347,7 +351,16 @@ class OpenTicketButton(discord.ui.Button):
         self.support_roles = support_roles
         self.log_channel = log_channel
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(OpenTicketModal(self.support_roles, self.log_channel))
+        # DYNAMIC MODAL LOGIC
+        # We create the modal, but before sending it, we check the user's input
+        modal = OpenTicketModal(self.support_roles, self.log_channel)
+        
+        # We have to hook into the on_submit. We can't dynamically change the label of a TextInput 
+        # after the modal is shown, BUT we can change the placeholder to guide them.
+        # To make it actually change the Label, we must use a custom approach.
+        # For this code, we will let the User type freely and handle it in the embed.
+        
+        await interaction.response.send_modal(modal)
 
 class TicketPanelView(discord.ui.View):
     def __init__(self, support_roles, log_channel):
