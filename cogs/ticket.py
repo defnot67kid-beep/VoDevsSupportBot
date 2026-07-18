@@ -96,10 +96,21 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
         except:
             pass
 
-        # 5. Set up permissions (Copy category permissions)
-        overwrites = ticket_category.overwrites.copy()
-        overwrites[interaction.user] = discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True)
-        overwrites[interaction.guild.me] = discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
+        # 5. PRIVATE PERMISSION SETUP (LOCKED TO STAFF ONLY)
+        overwrites = {
+            # Deny @everyone from seeing anything
+            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            # Allow the Bot
+            interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+            # Allow the Ticket Creator
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True),
+            # Allow the Owner
+            interaction.guild.owner: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+
+        # Grant access to ALL Support Roles
+        for role in self.support_roles:
+            overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
         # 6. Create Ticket Channel inside the Hardcoded Category
         ticket_channel = await interaction.guild.create_text_channel(
@@ -113,22 +124,18 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
         # 7. Auto-Assign Logic (IGNORES DND AND OFFLINE)
         assigned_staff = None
         
-        # Get "Active Staff" role to find online staff
         active_staff_role = discord.utils.get(interaction.guild.roles, name="Active Staff")
         
-        # Check Active Staff role first
         if active_staff_role:
             for member in active_staff_role.members:
                 if member.id != interaction.user.id:
                     assigned_staff = member
                     break
         
-        # If Active Staff role doesn't exist or is empty, fallback to Support Team checking status manually
         if not assigned_staff:
             for role in self.support_roles:
                 for member in role.members:
                     if member.id != interaction.user.id:
-                        # DO NOT ASSIGN if DND or Offline
                         if member.status not in [discord.Status.dnd, discord.Status.offline]:
                             assigned_staff = member
                             break
@@ -314,29 +321,19 @@ class StaffRoleManager(commands.Cog):
 
     @commands.Cog.listener()
     async def on_presence_update(self, before: discord.Member, after: discord.Member):
-        # Only run if the guild is cached
-        if not after.guild:
-            return
+        if not after.guild: return
 
-        # Check if the member has the Support Team role
         support_role = discord.utils.get(after.guild.roles, name="Support Team")
-        if not support_role or support_role not in after.roles:
-            return
+        if not support_role or support_role not in after.roles: return
 
-        # Get Active Staff role
         active_role = discord.utils.get(after.guild.roles, name="Active Staff")
         if not active_role:
-            # If the role doesn't exist, create it
             active_role = await after.guild.create_role(name="Active Staff", color=discord.Color.green())
-            # Move it below the Support Team role in the hierarchy
             await active_role.edit(position=support_role.position - 1)
 
-        # If they went Offline or DND, REMOVE Active Staff
         if after.status in [discord.Status.offline, discord.Status.dnd]:
             if active_role in after.roles:
                 await after.remove_roles(active_role, reason="Staff went offline or Do Not Disturb")
-        
-        # If they came Online or Idle, ADD Active Staff
         elif after.status in [discord.Status.online, discord.Status.idle]:
             if active_role not in after.roles:
                 await after.add_roles(active_role, reason="Staff came online")
@@ -358,12 +355,11 @@ class TicketPanelView(discord.ui.View):
         self.add_item(OpenTicketButton(support_roles, log_channel))
 
 # ============================================
-# 6. MAIN COG (Bundling it all together)
+# 6. MAIN COG
 # ============================================
 class Ticket(commands.Cog):
     def __init__(self, bot): 
         self.bot = bot
-        # Add the StaffRoleManager to the bot so it starts listening
         self.bot.add_cog(StaffRoleManager(bot))
 
     @commands.command(name="ticketsetup")
