@@ -147,11 +147,8 @@ class TicketControlView(View):
 
         try:
             await interaction.channel.edit(name=f"{interaction.channel.name}-claimed")
-            
-            # --- NOTIFICATION: Ticket Claimed ---
             await interaction.followup.send(f"👋 {interaction.user.mention} has claimed this ticket.", ephemeral=False)
             
-            # Send notification to the log channel
             if self.log_channel:
                 claim_embed = discord.Embed(
                     title="👋 Ticket Claimed",
@@ -173,7 +170,6 @@ class TicketControlView(View):
             
         await interaction.followup.send("🗑️ Closing ticket and deleting channel in 5 seconds...", ephemeral=False)
         
-        # --- NOTIFICATION: Ticket Closed ---
         if self.log_channel:
             close_embed = discord.Embed(
                 title="🗑️ Ticket Closed",
@@ -255,31 +251,55 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
+        # 1. Check for existing ticket
         for channel in interaction.guild.channels:
             if isinstance(channel, discord.TextChannel) and channel.name.startswith("ticket-"):
                 if interaction.user in channel.members:
                     await interaction.followup.send("❌ You already have an open ticket!", ephemeral=True)
                     return
 
+        # 2. Generate Ticket Code
         alphabet = string.ascii_lowercase + string.digits
         while True:
             ticket_code = ''.join(secrets.choice(alphabet) for _ in range(5))
             if not discord.utils.get(interaction.guild.channels, name=f"ticket-{ticket_code}"):
                 break
 
+        # 3. Find or Create a PRIVATE CATEGORY for the user
+        category_name = f"tickets-{interaction.user.name}"
+        user_category = discord.utils.get(interaction.guild.categories, name=category_name)
+
+        if not user_category:
+            # Create a hidden category visible only to the user, bot, owner, and staff
+            category_overwrites = {
+                interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                interaction.guild.me: discord.PermissionOverwrite(read_messages=True, manage_channels=True),
+                interaction.user: discord.PermissionOverwrite(read_messages=True),
+                interaction.guild.owner: discord.PermissionOverwrite(read_messages=True) # Owner sees ALL private categories
+            }
+            for role in self.support_roles:
+                category_overwrites[role] = discord.PermissionOverwrite(read_messages=True)
+
+            user_category = await interaction.guild.create_category(
+                name=category_name,
+                overwrites=category_overwrites,
+                reason=f"Private category created for {interaction.user}"
+            )
+
+        # 4. Create Channel inside the Private Category
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
             interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True)
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True),
+            interaction.guild.owner: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
-        
-        overwrites[interaction.guild.owner] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        
+
         for role in self.support_roles:
             overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
         ticket_channel = await interaction.guild.create_text_channel(
             name=f"ticket-{ticket_code}",
+            category=user_category, # Put the ticket in their private category!
             overwrites=overwrites,
             reason=f"Ticket opened by {interaction.user} for {self.reason.value}"
         )
@@ -289,6 +309,7 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
             log_embed = discord.Embed(title="🎫 Ticket Opened", color=discord.Color.green(), timestamp=datetime.utcnow())
             log_embed.add_field(name="User", value=interaction.user.mention)
             log_embed.add_field(name="Reason", value=self.reason.value)
+            log_embed.add_field(name="Category", value=user_category.name)
             log_embed.add_field(name="Channel", value=ticket_channel.mention)
             await self.log_channel.send(embed=log_embed)
 
@@ -336,10 +357,9 @@ class Ticket(commands.Cog):
     async def ticket_setup(self, ctx):
         """[Admin] Deploys the new Ticket Panel."""
         
-        # Fetch the hardcoded channel
         notification_channel = self.bot.get_channel(NOTIFICATION_CHANNEL_ID)
         if not notification_channel:
-            await ctx.send(f"❌ Could not find the notification channel with ID `{NOTIFICATION_CHANNEL_ID}`. Please make sure the bot can see it.")
+            await ctx.send(f"❌ Could not find the notification channel with ID `{NOTIFICATION_CHANNEL_ID}`.")
             return
 
         support_role = discord.utils.get(ctx.guild.roles, name="Support Team")
@@ -353,7 +373,6 @@ class Ticket(commands.Cog):
         )
         embed.set_footer(text="Our team will assist you as soon as possible.")
 
-        # Pass the notification channel to the view
         view = TicketPanelView([support_role], notification_channel)
         await ctx.send(embed=embed, view=view)
         await ctx.message.delete()
