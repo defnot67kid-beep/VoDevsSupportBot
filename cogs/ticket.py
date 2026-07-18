@@ -110,24 +110,36 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
         )
         await ticket_channel.edit(topic=f"Opened by: {interaction.user.id}")
 
-        # 7. Auto-Assign Logic
+        # 7. Auto-Assign Logic (IGNORES DND AND OFFLINE)
         assigned_staff = None
-        for role in self.support_roles:
-            for member in role.members:
+        
+        # Get "Active Staff" role to find online staff
+        active_staff_role = discord.utils.get(interaction.guild.roles, name="Active Staff")
+        
+        # Check Active Staff role first
+        if active_staff_role:
+            for member in active_staff_role.members:
                 if member.id != interaction.user.id:
                     assigned_staff = member
                     break
-            if assigned_staff:
-                break
+        
+        # If Active Staff role doesn't exist or is empty, fallback to Support Team checking status manually
+        if not assigned_staff:
+            for role in self.support_roles:
+                for member in role.members:
+                    if member.id != interaction.user.id:
+                        # DO NOT ASSIGN if DND or Offline
+                        if member.status not in [discord.Status.dnd, discord.Status.offline]:
+                            assigned_staff = member
+                            break
+                if assigned_staff:
+                    break
 
         # 8. CREATE THE COMBINED PINNED EMBED
-        # Convert Previous Tickets list into the exact format requested
         prev_tix_str = "\n".join([f"• {code} ( # *unknown* )" for code in previous_tickets]) if previous_tickets else "None"
 
-        # Profile Text
         profile_text = f"**User:** {interaction.user.mention}\n**ID:** `{interaction.user.id}`\n**Joined Server:** <t:{int(interaction.user.joined_at.timestamp())}:R>\n**Joined Discord:** <t:{int(interaction.user.created_at.timestamp())}:R>"
 
-        # Construct the main text description
         combined_description = (
             f"Ticket created by {interaction.user.mention} (`{interaction.user.id}`)\n\n"
             f"**Ticket Controls**\nUse the buttons below to manage this ticket.\n\n"
@@ -141,7 +153,6 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
             color=discord.Color.dark_embed()
         )
         
-        # Add the 3 questions as fields
         main_embed.add_field(name="What kind of appeal is this?", value=self.appeal_type.value, inline=False)
         main_embed.add_field(name="What punishment did you receive?", value=self.punishment.value, inline=False)
         main_embed.add_field(name="Explain your reason behind the appeal.", value=self.reason.value, inline=False)
@@ -151,7 +162,7 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
         if assigned_staff:
             assign_msg = f"{assigned_staff.mention} has been assigned to this ticket automatically. Please note that your ticket may be assigned to someone else depending on what is needed to resolve your issue.\n\n**Do NOT ping this person, they have been notified already.**"
         else:
-            assign_msg = "No staff members are currently available. Please wait for a staff member to help you."
+            assign_msg = "No online staff members are currently available. Please wait for a staff member to help you."
 
         # 10. Send Message and Pin it
         view = TicketControlView(self.log_channel, self.support_roles, ticket_code)
@@ -242,7 +253,6 @@ class TicketControlView(View):
         if not self.is_staff_or_owner(interaction): return await interaction.followup.send("❌ Staff/Owner only.", ephemeral=True)
         if await self.is_ticket_creator(interaction): return await interaction.followup.send("❌ Cannot claim own ticket.", ephemeral=True)
         try:
-            # FIX: Replace "ticket-" with "claimed-"
             new_name = interaction.channel.name.replace("ticket-", "claimed-", 1)
             await interaction.channel.edit(name=new_name)
             await interaction.followup.send(f"👋 {interaction.user.mention} has claimed this ticket.", ephemeral=False)
@@ -296,7 +306,43 @@ class TicketControlView(View):
         asyncio.create_task(auto_close())
 
 # ============================================
-# 4. OPEN TICKET BUTTON & PANEL VIEW
+# 4. ACTIVE STAFF AUTO-ROLE MANAGER
+# ============================================
+class StaffRoleManager(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_presence_update(self, before: discord.Member, after: discord.Member):
+        # Only run if the guild is cached
+        if not after.guild:
+            return
+
+        # Check if the member has the Support Team role
+        support_role = discord.utils.get(after.guild.roles, name="Support Team")
+        if not support_role or support_role not in after.roles:
+            return
+
+        # Get Active Staff role
+        active_role = discord.utils.get(after.guild.roles, name="Active Staff")
+        if not active_role:
+            # If the role doesn't exist, create it
+            active_role = await after.guild.create_role(name="Active Staff", color=discord.Color.green())
+            # Move it below the Support Team role in the hierarchy
+            await active_role.edit(position=support_role.position - 1)
+
+        # If they went Offline or DND, REMOVE Active Staff
+        if after.status in [discord.Status.offline, discord.Status.dnd]:
+            if active_role in after.roles:
+                await after.remove_roles(active_role, reason="Staff went offline or Do Not Disturb")
+        
+        # If they came Online or Idle, ADD Active Staff
+        elif after.status in [discord.Status.online, discord.Status.idle]:
+            if active_role not in after.roles:
+                await after.add_roles(active_role, reason="Staff came online")
+
+# ============================================
+# 5. OPEN TICKET BUTTON & PANEL VIEW
 # ============================================
 class OpenTicketButton(discord.ui.Button):
     def __init__(self, support_roles, log_channel):
@@ -312,10 +358,13 @@ class TicketPanelView(discord.ui.View):
         self.add_item(OpenTicketButton(support_roles, log_channel))
 
 # ============================================
-# 5. MAIN COG
+# 6. MAIN COG (Bundling it all together)
 # ============================================
 class Ticket(commands.Cog):
-    def __init__(self, bot): self.bot = bot
+    def __init__(self, bot): 
+        self.bot = bot
+        # Add the StaffRoleManager to the bot so it starts listening
+        self.bot.add_cog(StaffRoleManager(bot))
 
     @commands.command(name="ticketsetup")
     @commands.has_permissions(administrator=True)
