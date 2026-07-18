@@ -11,6 +11,9 @@ from datetime import datetime, timedelta
 # ============================================
 NOTIFICATION_CHANNEL_ID = 1527982333834166333  # Your specified channel ID
 
+# Profanity Filter List (Expand this as needed)
+BAD_WORDS = ["nigger", "nigga", "faggot", "retard", "kike", "chink"] 
+
 # ============================================
 # 1. MODAL: Edit Ticket Name
 # ============================================
@@ -126,6 +129,16 @@ class TicketControlView(View):
         is_owner = interaction.user.id == interaction.guild.owner_id
         return is_owner or has_role
 
+    async def is_ticket_creator(self, interaction: discord.Interaction):
+        # Checks if the user is the one who created the ticket
+        try:
+            async for entry in interaction.channel.audit_logs(limit=5, action=discord.AuditLogAction.channel_create):
+                if entry.target.id == interaction.channel.id:
+                    return interaction.user.id == entry.user.id
+        except:
+            pass
+        return False
+
     @discord.ui.button(label="Claim", emoji="👋", style=discord.ButtonStyle.primary, custom_id="ticket_claim")
     async def claim_ticket(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer()
@@ -134,16 +147,9 @@ class TicketControlView(View):
             await interaction.followup.send("❌ You do not have permission to claim tickets. Only Staff/Owner can claim.", ephemeral=True)
             return
 
-        try:
-            async for entry in interaction.channel.audit_logs(limit=5, action=discord.AuditLogAction.channel_create):
-                if entry.target.id == interaction.channel.id:
-                    opener = entry.user
-                    if interaction.user.id == opener.id:
-                        await interaction.followup.send("❌ You cannot claim your own ticket!", ephemeral=True)
-                        return
-                    break
-        except:
-            pass
+        if await self.is_ticket_creator(interaction):
+            await interaction.followup.send("❌ You cannot claim your own ticket!", ephemeral=True)
+            return
 
         try:
             await interaction.channel.edit(name=f"{interaction.channel.name}-claimed")
@@ -164,8 +170,11 @@ class TicketControlView(View):
     @discord.ui.button(label="Close", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="ticket_close")
     async def close_ticket(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer()
-        if not self.is_staff_or_owner(interaction):
-            await interaction.followup.send("❌ Only Staff/Owner can close this ticket.", ephemeral=True)
+        
+        # ALLOW the Ticket Creator OR Staff/Owner to close the ticket
+        is_creator = await self.is_ticket_creator(interaction)
+        if not (self.is_staff_or_owner(interaction) or is_creator):
+            await interaction.followup.send("❌ Only Staff, Owner, or the Ticket Creator can close this ticket.", ephemeral=True)
             return
             
         await interaction.followup.send("🗑️ Closing ticket and deleting channel in 5 seconds...", ephemeral=False)
@@ -208,8 +217,10 @@ class TicketControlView(View):
 
     @discord.ui.button(label="Request Closure", emoji="💬", style=discord.ButtonStyle.secondary, custom_id="ticket_request_close")
     async def request_closure(self, interaction: discord.Interaction, button: Button):
-        if not self.is_staff_or_owner(interaction):
-            await interaction.response.send_message("❌ Only Staff/Owner can request closure.", ephemeral=True)
+        # ALLOW Ticket Creator or Staff/Owner to request closure
+        is_creator = await self.is_ticket_creator(interaction)
+        if not (self.is_staff_or_owner(interaction) or is_creator):
+            await interaction.response.send_message("❌ Only Staff, Owner, or the Ticket Creator can request closure.", ephemeral=True)
             return
             
         await interaction.response.defer()
@@ -251,17 +262,18 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        # 1. FIX: Check for existing ticket BY THE CREATOR
-        # We look for channels in their private category that have their User ID in the name.
-        # This prevents staff members from being blocked by tickets they didn't open.
+        # --- FILTER: Check for racist / abusive language ---
+        if any(bad_word in self.reason.value.lower() for bad_word in BAD_WORDS):
+            await interaction.followup.send("❌ Your ticket reason contains inappropriate or hateful language. Please rephrase your issue and try again.", ephemeral=True)
+            return
+
+        # 1. Check for existing ticket
         category_name = f"tickets-{interaction.user.name}"
         user_category = discord.utils.get(interaction.guild.categories, name=category_name)
 
         if user_category:
             for channel in user_category.channels:
                 if isinstance(channel, discord.TextChannel) and channel.name.startswith("ticket-"):
-                    # Check if the channel name contains the user's ID (safer than .members)
-                    # You can also use the channel topic if you prefer
                     await interaction.followup.send("❌ You already have an open ticket! Please check your private `tickets-...` category.", ephemeral=True)
                     return
 
@@ -274,12 +286,11 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
 
         # 3. Find or Create a PRIVATE CATEGORY for the user
         if not user_category:
-            # Create a hidden category visible only to the user, bot, owner, and staff
             category_overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
                 interaction.guild.me: discord.PermissionOverwrite(read_messages=True, manage_channels=True),
                 interaction.user: discord.PermissionOverwrite(read_messages=True),
-                interaction.guild.owner: discord.PermissionOverwrite(read_messages=True) # Owner sees ALL private categories
+                interaction.guild.owner: discord.PermissionOverwrite(read_messages=True)
             }
             for role in self.support_roles:
                 category_overwrites[role] = discord.PermissionOverwrite(read_messages=True)
@@ -303,12 +314,11 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
 
         ticket_channel = await interaction.guild.create_text_channel(
             name=f"ticket-{ticket_code}",
-            category=user_category, # Put the ticket in their private category!
+            category=user_category,
             overwrites=overwrites,
             reason=f"Ticket opened by {interaction.user} for {self.reason.value}"
         )
         
-        # (Optional) Set the channel topic to store the opener's ID for future reference
         await ticket_channel.edit(topic=f"Opened by: {interaction.user.id}")
 
         # --- NOTIFICATION: Ticket Created ---
