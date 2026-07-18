@@ -251,11 +251,18 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        # 1. Check for existing ticket
-        for channel in interaction.guild.channels:
-            if isinstance(channel, discord.TextChannel) and channel.name.startswith("ticket-"):
-                if interaction.user in channel.members:
-                    await interaction.followup.send("❌ You already have an open ticket!", ephemeral=True)
+        # 1. FIX: Check for existing ticket BY THE CREATOR
+        # We look for channels in their private category that have their User ID in the name.
+        # This prevents staff members from being blocked by tickets they didn't open.
+        category_name = f"tickets-{interaction.user.name}"
+        user_category = discord.utils.get(interaction.guild.categories, name=category_name)
+
+        if user_category:
+            for channel in user_category.channels:
+                if isinstance(channel, discord.TextChannel) and channel.name.startswith("ticket-"):
+                    # Check if the channel name contains the user's ID (safer than .members)
+                    # You can also use the channel topic if you prefer
+                    await interaction.followup.send("❌ You already have an open ticket! Please check your private `tickets-...` category.", ephemeral=True)
                     return
 
         # 2. Generate Ticket Code
@@ -266,9 +273,6 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
                 break
 
         # 3. Find or Create a PRIVATE CATEGORY for the user
-        category_name = f"tickets-{interaction.user.name}"
-        user_category = discord.utils.get(interaction.guild.categories, name=category_name)
-
         if not user_category:
             # Create a hidden category visible only to the user, bot, owner, and staff
             category_overwrites = {
@@ -303,6 +307,9 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
             overwrites=overwrites,
             reason=f"Ticket opened by {interaction.user} for {self.reason.value}"
         )
+        
+        # (Optional) Set the channel topic to store the opener's ID for future reference
+        await ticket_channel.edit(topic=f"Opened by: {interaction.user.id}")
 
         # --- NOTIFICATION: Ticket Created ---
         if self.log_channel:
@@ -359,7 +366,7 @@ class Ticket(commands.Cog):
         
         notification_channel = self.bot.get_channel(NOTIFICATION_CHANNEL_ID)
         if not notification_channel:
-            await ctx.send(f"❌ Could not find the notification channel with ID `{NOTIFICATION_CHANNEL_ID}`.")
+            await ctx.send(f"❌ Could not find the notification channel with ID `{NOTIFICATION_CHANNEL_ID}`. Please make sure the bot can see it.")
             return
 
         support_role = discord.utils.get(ctx.guild.roles, name="Support Team")
