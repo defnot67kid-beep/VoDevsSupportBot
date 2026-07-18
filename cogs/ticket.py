@@ -58,10 +58,8 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
             return
 
         # 2. Check for existing open ticket
-        # We check all channels inside the main category for the user
         for channel in ticket_category.channels:
             if isinstance(channel, discord.TextChannel) and channel.name.startswith("ticket-"):
-                # Check permissions to see if user is in it (Simplified check)
                 if interaction.user in channel.members:
                     await interaction.followup.send("❌ You already have an open ticket! Please check the ticket category.", ephemeral=True)
                     return
@@ -83,7 +81,7 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
                     previous_tickets = interaction.user.nick[start:end].split(", ")
         
         previous_tickets.append(ticket_code)
-        if len(previous_tickets) > 10: # Keep only last 10
+        if len(previous_tickets) > 10:
             previous_tickets.pop(0)
             
         new_nick = interaction.user.display_name
@@ -91,7 +89,6 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
             new_nick = interaction.user.name
         else:
             new_nick = interaction.user.nick.split(" |")[0]
-            
         new_nick += f" | Tickets: [{', '.join(previous_tickets)}]"
         
         try:
@@ -99,14 +96,9 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
         except:
             pass
 
-        # 5. Set up permissions
-        # We copy the category's permission overwrites so staff can immediately see the ticket.
+        # 5. Set up permissions (Copy category permissions)
         overwrites = ticket_category.overwrites.copy()
-        
-        # Give the user full access
         overwrites[interaction.user] = discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True)
-        
-        # Ensure bot has full access
         overwrites[interaction.guild.me] = discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
 
         # 6. Create Ticket Channel inside the Hardcoded Category
@@ -116,7 +108,6 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
             overwrites=overwrites,
             reason=f"Ticket opened by {interaction.user}"
         )
-        
         await ticket_channel.edit(topic=f"Opened by: {interaction.user.id}")
 
         # 7. Auto-Assign Logic
@@ -129,54 +120,45 @@ class OpenTicketModal(Modal, title="Appeals Ticket"):
             if assigned_staff:
                 break
 
-        # 8. Create 3x Embeds (Panel, Profile, History)
-        embed1 = discord.Embed(
+        # 8. CREATE THE COMBINED PINNED EMBED
+        # Convert Previous Tickets list into the exact format requested
+        prev_tix_str = "\n".join([f"• {code} ( # *unknown* )" for code in previous_tickets]) if previous_tickets else "None"
+
+        # Profile Text
+        profile_text = f"**User:** {interaction.user.mention}\n**ID:** `{interaction.user.id}`\n**Joined Server:** <t:{int(interaction.user.joined_at.timestamp())}:R>\n**Joined Discord:** <t:{int(interaction.user.created_at.timestamp())}:R>"
+
+        # Construct the main text description
+        combined_description = (
+            f"Ticket created by {interaction.user.mention} (`{interaction.user.id}`)\n\n"
+            f"**Ticket Controls**\nUse the buttons below to manage this ticket.\n\n"
+            f"**Vortex Discord Profile**\n{profile_text}\n\n"
+            f"**Previous Tickets**\n{prev_tix_str}"
+        )
+
+        main_embed = discord.Embed(
             title=f"Appeals Ticket `{ticket_code}`",
-            description=f"Ticket created by {interaction.user.mention} (`{interaction.user.id}`)",
+            description=combined_description,
             color=discord.Color.dark_embed()
         )
-        embed1.add_field(name="**Ticket Controls**", value="Use the buttons below to manage this ticket.", inline=False)
         
-        embed2 = discord.Embed(
-            title="**Vortex Discord Profile**",
-            color=discord.Color.dark_embed()
-        )
-        if interaction.user in interaction.guild.members:
-            embed2.description = f"**User:** {interaction.user.mention}\n**ID:** `{interaction.user.id}`\n**Joined Server:** <t:{int(interaction.user.joined_at.timestamp())}:R>\n**Joined Discord:** <t:{int(interaction.user.created_at.timestamp())}:R>"
-        else:
-            embed2.description = "This user is not a member of the Vortex Discord server."
+        # Add the 3 questions as fields
+        main_embed.add_field(name="What kind of appeal is this?", value=self.appeal_type.value, inline=False)
+        main_embed.add_field(name="What punishment did you receive?", value=self.punishment.value, inline=False)
+        main_embed.add_field(name="Explain your reason behind the appeal.", value=self.reason.value, inline=False)
 
-        embed3 = discord.Embed(
-            title="**Previous Tickets**",
-            description="\n".join([f"• `{code}` ( # *unknown* )" for code in previous_tickets]) if previous_tickets else "No previous tickets found.",
-            color=discord.Color.dark_embed()
-        )
-
-        # 9. Send Initial Message and Pinned Message
-        view = TicketControlView(self.log_channel, self.support_roles, ticket_code)
-        await ticket_channel.send(embed=embed1, view=view)
-        await ticket_channel.send(embed=embed2)
-        await ticket_channel.send(embed=embed3)
-
-        # 10. Send Auto-Assign / Question Answers Message
-        answers_embed = discord.Embed(
-            color=discord.Color.from_rgb(46, 204, 113)
-        )
-        answers_embed.add_field(name="What kind of appeal is this?", value=self.appeal_type.value, inline=False)
-        answers_embed.add_field(name="What punishment did you receive?", value=self.punishment.value, inline=False)
-        answers_embed.add_field(name="Explain your reason behind the appeal.", value=self.reason.value, inline=False)
-        
+        # 9. Construct Auto-Assign Message
         assign_msg = ""
         if assigned_staff:
             assign_msg = f"{assigned_staff.mention} has been assigned to this ticket automatically. Please note that your ticket may be assigned to someone else depending on what is needed to resolve your issue.\n\n**Do NOT ping this person, they have been notified already.**"
         else:
             assign_msg = "No staff members are currently available. Please wait for a staff member to help you."
 
-        await ticket_channel.send(content=assign_msg, embed=answers_embed)
+        # 10. Send Message and Pin it
+        view = TicketControlView(self.log_channel, self.support_roles, ticket_code)
+        sent_message = await ticket_channel.send(content=assign_msg, embed=main_embed, view=view)
         
         try:
-            pinned_msg = await ticket_channel.send("📌 Pinned Message: Ticket Details")
-            await pinned_msg.pin()
+            await sent_message.pin()
         except:
             pass
 
@@ -234,7 +216,7 @@ class TicketAccessModal(Modal, title="Manage Ticket Access"):
         except Exception as e: await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
 
 # ============================================
-# 3. TICKET CONTROL VIEW (WITHOUT "-claimed" SUFFIX)
+# 3. TICKET CONTROL VIEW
 # ============================================
 class TicketControlView(View):
     def __init__(self, log_channel, support_roles, ticket_code):
@@ -260,10 +242,9 @@ class TicketControlView(View):
         if not self.is_staff_or_owner(interaction): return await interaction.followup.send("❌ Staff/Owner only.", ephemeral=True)
         if await self.is_ticket_creator(interaction): return await interaction.followup.send("❌ Cannot claim own ticket.", ephemeral=True)
         try:
-            # FIX: Simply replace "ticket-" with "claimed-" instead of appending
+            # FIX: Replace "ticket-" with "claimed-"
             new_name = interaction.channel.name.replace("ticket-", "claimed-", 1)
             await interaction.channel.edit(name=new_name)
-            
             await interaction.followup.send(f"👋 {interaction.user.mention} has claimed this ticket.", ephemeral=False)
             if self.log_channel:
                 embed = discord.Embed(title="👋 Ticket Claimed", description=f"**Staff:** {interaction.user.mention}\n**Code:** {self.ticket_code}", color=discord.Color.blue())
