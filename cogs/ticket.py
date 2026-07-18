@@ -218,10 +218,10 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
             if not discord.utils.get(interaction.guild.channels, name=f"ticket-{ticket_code}"):
                 break
 
-        # Get or create the "ticket" category
+        # Get the ticket category
         ticket_category = discord.utils.get(interaction.guild.categories, name="ticket")
         if not ticket_category:
-            # Create the "ticket" category if it doesn't exist
+            # Create the category if it doesn't exist
             ticket_category = await interaction.guild.create_category("ticket")
 
         # Overwrites
@@ -234,7 +234,7 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
         for role in self.support_roles:
             overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
-        # Create Channel in the "ticket" category
+        # Create Channel in the ticket category
         ticket_channel = await interaction.guild.create_text_channel(
             name=f"ticket-{ticket_code}",
             category=ticket_category,
@@ -292,6 +292,7 @@ class Ticket(commands.Cog):
         self.bot = bot
         self.panel_messages = {} # Store to re-add views on startup
         self.log_channel_id = None
+        self.ticket_category_name = "ticket"
 
     @commands.command(name="ticketsetup")
     @commands.has_permissions(administrator=True)
@@ -307,10 +308,10 @@ class Ticket(commands.Cog):
         if not support_role:
             support_role = await ctx.guild.create_role(name="Support Team", color=discord.Color.blue())
 
-        # Get or create the "ticket" category
-        ticket_category = discord.utils.get(ctx.guild.categories, name="ticket")
+        # Ensure ticket category exists
+        ticket_category = discord.utils.get(ctx.guild.categories, name=self.ticket_category_name)
         if not ticket_category:
-            ticket_category = await ctx.guild.create_category("ticket")
+            ticket_category = await ctx.guild.create_category(self.ticket_category_name)
 
         # Deploy Panel
         embed = discord.Embed(
@@ -324,25 +325,33 @@ class Ticket(commands.Cog):
         await ctx.send(embed=embed, view=view)
         await ctx.message.delete()
 
-    @commands.command(name="ticketopn")
-    @commands.has_permissions(administrator=True)
-    async def ticket_opn(self, ctx, user: discord.Member = None):
-        """[Admin] Opens a ticket for a specific user."""
-        if not user:
-            await ctx.send("❌ Please specify a user: `!ticketopn @user`")
-            return
+    @commands.command(name="cancelclose")
+    async def cancel_closure(self, ctx):
+        """Cancels a closure request (must be used in the ticket channel)."""
+        await ctx.send("✅ Closure request cancelled. This ticket will remain open.")
+        # In a fully advanced system, you would cancel the scheduled task here.
 
+    @commands.command(name="ticketopn")
+    async def ticket_opn(self, ctx, *, reason: str = "No reason provided"):
+        """Opens a ticket directly via command. Usage: !ticketopn <reason>"""
+        
         # Check if user already has a ticket
         for channel in ctx.guild.channels:
             if isinstance(channel, discord.TextChannel) and channel.name.startswith("ticket-"):
-                if user in channel.members:
-                    await ctx.send(f"❌ {user.mention} already has an open ticket!")
+                if ctx.author in channel.members:
+                    await ctx.send("❌ You already have an open ticket!", ephemeral=True)
                     return
 
-        # Get or create the "ticket" category
-        ticket_category = discord.utils.get(ctx.guild.categories, name="ticket")
+        # Get support role
+        support_role = discord.utils.get(ctx.guild.roles, name="Support Team")
+        if not support_role:
+            await ctx.send("❌ Support Team role not found! Please run !ticketsetup first.", ephemeral=True)
+            return
+
+        # Get ticket category
+        ticket_category = discord.utils.get(ctx.guild.categories, name=self.ticket_category_name)
         if not ticket_category:
-            ticket_category = await ctx.guild.create_category("ticket")
+            ticket_category = await ctx.guild.create_category(self.ticket_category_name)
 
         # Generate Random Code
         alphabet = string.ascii_lowercase + string.digits
@@ -351,40 +360,39 @@ class Ticket(commands.Cog):
             if not discord.utils.get(ctx.guild.channels, name=f"ticket-{ticket_code}"):
                 break
 
-        # Get support roles
-        support_role = discord.utils.get(ctx.guild.roles, name="Support Team")
-        if not support_role:
-            support_role = await ctx.guild.create_role(name="Support Team", color=discord.Color.blue())
-
         # Overwrites
         overwrites = {
             ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
             ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
-            user: discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True)
+            ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True)
         }
+
+        # Add support role permissions
         overwrites[support_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
-        # Create Channel in the "ticket" category
+        # Create Channel in ticket category
         ticket_channel = await ctx.guild.create_text_channel(
             name=f"ticket-{ticket_code}",
             category=ticket_category,
             overwrites=overwrites,
-            reason=f"Ticket opened by {ctx.author} for {user}"
+            reason=f"Ticket opened by {ctx.author} via !ticketopn command"
         )
 
-        # Log to system channel if applicable
+        # Log channel setup
         log_channel = ctx.guild.get_channel(self.log_channel_id) if self.log_channel_id else None
+        
+        # Log to system channel if applicable
         if log_channel:
-            log_embed = discord.Embed(title="🎫 Ticket Opened (Staff)", color=discord.Color.green(), timestamp=datetime.utcnow())
-            log_embed.add_field(name="User", value=user.mention)
-            log_embed.add_field(name="Opened By", value=ctx.author.mention)
+            log_embed = discord.Embed(title="🎫 Ticket Opened (Command)", color=discord.Color.green(), timestamp=datetime.utcnow())
+            log_embed.add_field(name="User", value=ctx.author.mention)
+            log_embed.add_field(name="Reason", value=reason)
             log_embed.add_field(name="Channel", value=ticket_channel.mention)
             await log_channel.send(embed=log_embed)
 
         # Send Control Panel
         embed = discord.Embed(
             title=f"Ticket | {ticket_code}",
-            description=f"Opened for {user.mention} by {ctx.author.mention}\n\nPlease wait for a staff member to help you.",
+            description=f"Opened by {ctx.author.mention}\n**Reason:** {reason}\n\nPlease wait for a staff member to help you.",
             color=discord.Color.blue(),
             timestamp=datetime.utcnow()
         )
@@ -392,13 +400,7 @@ class Ticket(commands.Cog):
 
         # Send the view
         await ticket_channel.send(embed=embed, view=TicketControlView(log_channel))
-        await ctx.send(f"✅ Ticket created for {user.mention}! Please go to {ticket_channel.mention}")
-
-    @commands.command(name="cancelclose")
-    async def cancel_closure(self, ctx):
-        """Cancels a closure request (must be used in the ticket channel)."""
-        await ctx.send("✅ Closure request cancelled. This ticket will remain open.")
-        # In a fully advanced system, you would cancel the scheduled task here.
+        await ctx.send(f"✅ Ticket created! Please go to {ticket_channel.mention}")
 
 async def setup(bot):
     await bot.add_cog(Ticket(bot))
