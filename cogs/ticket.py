@@ -1,4 +1,4 @@
-import discord
+ import discord
 from discord.ext import commands
 from discord.ui import View, Button, Modal, TextInput
 import asyncio
@@ -195,11 +195,10 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
         min_length=10
     )
 
-    def __init__(self, support_roles, log_channel, ticket_category):
+    def __init__(self, support_roles, log_channel):
         super().__init__()
         self.support_roles = support_roles
         self.log_channel = log_channel
-        self.ticket_category = ticket_category
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -218,12 +217,6 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
             if not discord.utils.get(interaction.guild.channels, name=f"ticket-{ticket_code}"):
                 break
 
-        # Get the ticket category
-        ticket_category = discord.utils.get(interaction.guild.categories, name="ticket")
-        if not ticket_category:
-            # Create the category if it doesn't exist
-            ticket_category = await interaction.guild.create_category("ticket")
-
         # Overwrites
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
@@ -234,10 +227,9 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
         for role in self.support_roles:
             overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
-        # Create Channel in the ticket category
+        # Create Channel
         ticket_channel = await interaction.guild.create_text_channel(
             name=f"ticket-{ticket_code}",
-            category=ticket_category,
             overwrites=overwrites,
             reason=f"Ticket opened by {interaction.user} for {self.reason.value}"
         )
@@ -267,22 +259,21 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
 # 6. OPEN TICKET BUTTON (ON PANEL)
 # ============================================
 class OpenTicketButton(discord.ui.Button):
-    def __init__(self, support_roles, log_channel, ticket_category):
+    def __init__(self, support_roles, log_channel):
         super().__init__(style=discord.ButtonStyle.success, label="Open Ticket", emoji="🎫", custom_id="open_ticket_panel")
         self.support_roles = support_roles
         self.log_channel = log_channel
-        self.ticket_category = ticket_category
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(OpenTicketModal(self.support_roles, self.log_channel, self.ticket_category))
+        await interaction.response.send_modal(OpenTicketModal(self.support_roles, self.log_channel))
 
 # ============================================
 # 7. PANEL VIEW (TO DEPLOY THE BUTTON)
 # ============================================
 class TicketPanelView(discord.ui.View):
-    def __init__(self, support_roles, log_channel, ticket_category):
+    def __init__(self, support_roles, log_channel):
         super().__init__(timeout=None)
-        self.add_item(OpenTicketButton(support_roles, log_channel, ticket_category))
+        self.add_item(OpenTicketButton(support_roles, log_channel))
 
 # ============================================
 # 8. THE MAIN COG
@@ -292,7 +283,6 @@ class Ticket(commands.Cog):
         self.bot = bot
         self.panel_messages = {} # Store to re-add views on startup
         self.log_channel_id = None
-        self.ticket_category_name = "ticket"
 
     @commands.command(name="ticketsetup")
     @commands.has_permissions(administrator=True)
@@ -308,11 +298,6 @@ class Ticket(commands.Cog):
         if not support_role:
             support_role = await ctx.guild.create_role(name="Support Team", color=discord.Color.blue())
 
-        # Ensure ticket category exists
-        ticket_category = discord.utils.get(ctx.guild.categories, name=self.ticket_category_name)
-        if not ticket_category:
-            ticket_category = await ctx.guild.create_category(self.ticket_category_name)
-
         # Deploy Panel
         embed = discord.Embed(
             title="Support Tickets",
@@ -321,7 +306,7 @@ class Ticket(commands.Cog):
         )
         embed.set_footer(text="Our team will assist you as soon as possible.")
 
-        view = TicketPanelView([support_role], ctx.guild.get_channel(self.log_channel_id), ticket_category)
+        view = TicketPanelView([support_role], ctx.guild.get_channel(self.log_channel_id))
         await ctx.send(embed=embed, view=view)
         await ctx.message.delete()
 
@@ -330,77 +315,6 @@ class Ticket(commands.Cog):
         """Cancels a closure request (must be used in the ticket channel)."""
         await ctx.send("✅ Closure request cancelled. This ticket will remain open.")
         # In a fully advanced system, you would cancel the scheduled task here.
-
-    @commands.command(name="ticketopn")
-    async def ticket_opn(self, ctx, *, reason: str = "No reason provided"):
-        """Opens a ticket directly via command. Usage: !ticketopn <reason>"""
-        
-        # Check if user already has a ticket
-        for channel in ctx.guild.channels:
-            if isinstance(channel, discord.TextChannel) and channel.name.startswith("ticket-"):
-                if ctx.author in channel.members:
-                    await ctx.send("❌ You already have an open ticket!", ephemeral=True)
-                    return
-
-        # Get support role
-        support_role = discord.utils.get(ctx.guild.roles, name="Support Team")
-        if not support_role:
-            await ctx.send("❌ Support Team role not found! Please run !ticketsetup first.", ephemeral=True)
-            return
-
-        # Get ticket category
-        ticket_category = discord.utils.get(ctx.guild.categories, name=self.ticket_category_name)
-        if not ticket_category:
-            ticket_category = await ctx.guild.create_category(self.ticket_category_name)
-
-        # Generate Random Code
-        alphabet = string.ascii_lowercase + string.digits
-        while True:
-            ticket_code = ''.join(secrets.choice(alphabet) for _ in range(5))
-            if not discord.utils.get(ctx.guild.channels, name=f"ticket-{ticket_code}"):
-                break
-
-        # Overwrites
-        overwrites = {
-            ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
-            ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True)
-        }
-
-        # Add support role permissions
-        overwrites[support_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-
-        # Create Channel in ticket category
-        ticket_channel = await ctx.guild.create_text_channel(
-            name=f"ticket-{ticket_code}",
-            category=ticket_category,
-            overwrites=overwrites,
-            reason=f"Ticket opened by {ctx.author} via !ticketopn command"
-        )
-
-        # Log channel setup
-        log_channel = ctx.guild.get_channel(self.log_channel_id) if self.log_channel_id else None
-        
-        # Log to system channel if applicable
-        if log_channel:
-            log_embed = discord.Embed(title="🎫 Ticket Opened (Command)", color=discord.Color.green(), timestamp=datetime.utcnow())
-            log_embed.add_field(name="User", value=ctx.author.mention)
-            log_embed.add_field(name="Reason", value=reason)
-            log_embed.add_field(name="Channel", value=ticket_channel.mention)
-            await log_channel.send(embed=log_embed)
-
-        # Send Control Panel
-        embed = discord.Embed(
-            title=f"Ticket | {ticket_code}",
-            description=f"Opened by {ctx.author.mention}\n**Reason:** {reason}\n\nPlease wait for a staff member to help you.",
-            color=discord.Color.blue(),
-            timestamp=datetime.utcnow()
-        )
-        embed.set_footer(text="Use the buttons below to manage this ticket.")
-
-        # Send the view
-        await ticket_channel.send(embed=embed, view=TicketControlView(log_channel))
-        await ctx.send(f"✅ Ticket created! Please go to {ticket_channel.mention}")
 
 async def setup(bot):
     await bot.add_cog(Ticket(bot))
