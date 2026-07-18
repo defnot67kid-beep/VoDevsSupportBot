@@ -111,18 +111,40 @@ class TicketAccessModal(Modal, title="Manage Ticket Access"):
 # 4. MAIN TICKET CONTROL VIEW (PERSISTENT)
 # ============================================
 class TicketControlView(View):
-    def __init__(self, log_channel: discord.TextChannel = None):
+    def __init__(self, log_channel: discord.TextChannel = None, support_roles=None):
         super().__init__(timeout=None) # Persistent View
         self.log_channel = log_channel
+        self.support_roles = support_roles or []
 
     @discord.ui.button(label="Claim", emoji="👋", style=discord.ButtonStyle.primary, custom_id="ticket_claim")
     async def claim_ticket(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer()
-        if interaction.user not in interaction.channel.members:
-            await interaction.followup.send("❌ You don't have access to this ticket.", ephemeral=True)
+        
+        # --- SECURITY: Restrict Claiming ---
+        # 1. Only server owner can claim
+        # 2. Users with support roles can claim
+        # 3. Ticket openers CANNOT claim their own ticket
+        has_role = any(role in interaction.user.roles for role in self.support_roles)
+        is_owner = interaction.user.id == interaction.guild.owner_id
+        
+        if not (is_owner or has_role):
+            await interaction.followup.send("❌ You do not have permission to claim tickets. Only Staff/Owner can claim.", ephemeral=True)
             return
 
-        # Simple claim logic: rename to show username
+        # Check if they are the opener (fetched via channel topic or name, but we use permissions as a marker here)
+        # We know the opener has specific perms. To ensure they don't claim their own:
+        try:
+            async for entry in interaction.channel.audit_logs(limit=5, action=discord.AuditLogAction.channel_create):
+                if entry.target.id == interaction.channel.id:
+                    opener = entry.user
+                    if interaction.user.id == opener.id:
+                        await interaction.followup.send("❌ You cannot claim your own ticket!", ephemeral=True)
+                        return
+                    break
+        except:
+            pass # If audit logs fail, continue anyway.
+
+        # Claim logic: rename to show username
         try:
             await interaction.channel.edit(name=f"{interaction.channel.name}-claimed")
             await interaction.followup.send(f"👋 {interaction.user.mention} has claimed this ticket.", ephemeral=False)
@@ -134,7 +156,6 @@ class TicketControlView(View):
         await interaction.response.defer()
         await interaction.followup.send("🗑️ Closing ticket and deleting channel in 5 seconds...", ephemeral=False)
         
-        # Logging logic
         if self.log_channel:
             embed = discord.Embed(
                 title="Ticket Closed",
@@ -203,38 +224,38 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        # Check for existing ticket
         for channel in interaction.guild.channels:
             if isinstance(channel, discord.TextChannel) and channel.name.startswith("ticket-"):
                 if interaction.user in channel.members:
                     await interaction.followup.send("❌ You already have an open ticket!", ephemeral=True)
                     return
 
-        # Generate Random Code
         alphabet = string.ascii_lowercase + string.digits
         while True:
             ticket_code = ''.join(secrets.choice(alphabet) for _ in range(5))
             if not discord.utils.get(interaction.guild.channels, name=f"ticket-{ticket_code}"):
                 break
 
-        # Overwrites
+        # Overwrites (Lockdown)
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
             interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
             interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True)
         }
 
+        # --- SECURITY: Grant access to Owner & Support Roles ---
+        # Make sure Owner can see the ticket
+        overwrites[interaction.guild.owner] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        
         for role in self.support_roles:
             overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
-        # Create Channel
         ticket_channel = await interaction.guild.create_text_channel(
             name=f"ticket-{ticket_code}",
             overwrites=overwrites,
             reason=f"Ticket opened by {interaction.user} for {self.reason.value}"
         )
 
-        # Log to system channel if applicable
         if self.log_channel:
             log_embed = discord.Embed(title="🎫 Ticket Opened", color=discord.Color.green(), timestamp=datetime.utcnow())
             log_embed.add_field(name="User", value=interaction.user.mention)
@@ -242,7 +263,6 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
             log_embed.add_field(name="Channel", value=ticket_channel.mention)
             await self.log_channel.send(embed=log_embed)
 
-        # Send Control Panel
         embed = discord.Embed(
             title=f"Ticket | {ticket_code}",
             description=f"Opened by {interaction.user.mention}\n**Reason:** {self.reason.value}\n\nPlease wait for a staff member to help you.",
@@ -251,8 +271,7 @@ class OpenTicketModal(Modal, title="Open a Ticket"):
         )
         embed.set_footer(text="Use the buttons below to manage this ticket.")
 
-        # Send the view
-        await ticket_channel.send(embed=embed, view=TicketControlView(self.log_channel))
+        await ticket_channel.send(embed=embed, view=TicketControlView(self.log_channel, self.support_roles))
         await interaction.followup.send(f"✅ Ticket created! Please go to {ticket_channel.mention}", ephemeral=True)
 
 # ============================================
@@ -281,7 +300,7 @@ class TicketPanelView(discord.ui.View):
 class Ticket(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.panel_messages = {} # Store to re-add views on startup
+        self.panel_messages = {} 
         self.log_channel_id = None
 
     @commands.command(name="ticketsetup")
@@ -298,7 +317,6 @@ class Ticket(commands.Cog):
         if not support_role:
             support_role = await ctx.guild.create_role(name="Support Team", color=discord.Color.blue())
 
-        # Deploy Panel
         embed = discord.Embed(
             title="Support Tickets",
             description="Click the button below to open a new ticket. Please describe your issue clearly!",
@@ -306,6 +324,7 @@ class Ticket(commands.Cog):
         )
         embed.set_footer(text="Our team will assist you as soon as possible.")
 
+        # Pass the specific staff role(s) to the view so the bot can use them for permission checks
         view = TicketPanelView([support_role], ctx.guild.get_channel(self.log_channel_id))
         await ctx.send(embed=embed, view=view)
         await ctx.message.delete()
@@ -314,7 +333,6 @@ class Ticket(commands.Cog):
     async def cancel_closure(self, ctx):
         """Cancels a closure request (must be used in the ticket channel)."""
         await ctx.send("✅ Closure request cancelled. This ticket will remain open.")
-        # In a fully advanced system, you would cancel the scheduled task here.
 
 async def setup(bot):
     await bot.add_cog(Ticket(bot))
